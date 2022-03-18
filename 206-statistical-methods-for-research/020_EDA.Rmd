@@ -1,0 +1,678 @@
+---
+title: 'STA 206: Final Project'
+author: "John, Eric, and Ignat"
+date: "12/2/2021"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(tidyverse)
+require(readxl)
+require(stargazer)
+require(GGally)
+require(latex2exp)
+require(MASS)
+require(reshape2)
+require(extrafont)
+require(ggpubr)
+require(lindia)
+require(scales)
+require(olsrr)
+```
+
+### EDA and Data Visualizations
+#### Step 1: Load in the data
+```{r}
+# A. Step 1: Load in the data
+#  1. Read the data in from the Excel file
+concrete <- read_xls("Concrete_Data.xls")
+
+#  2. Fix column names
+names(concrete) <- c("cement", "blast_furnace_slag", "fly_ash", "water", "superplasticizer", "coarse_aggregate", "fine_aggregate", "age", "concrete_strength")
+
+# B. Checks 
+#  1. Variable types
+sapply(concrete, class)
+
+#  2. Check for NA's 
+sapply(concrete, function(x) sum(is.na(x)))
+```
+
+#### Step 2: Summary Statistics
+```{r, results='asis'}
+# A. Summary statistics
+# stargazer(as.data.frame(concrete), header=FALSE, type='latex', add.lines = )
+
+# B. Correlation matrix
+concrete2 <- data.frame(concrete)
+names(concrete2) <- c("Cement","Blast~Furnace~Slag","Fly~Ash","Water","Superplasticizer",
+																						"Coarse~Aggregate","Fine~Aggregate", "Age~of~Testing", "Concrete~Strength")
+
+corr_m <- ggpairs(concrete2, lower = list(continuous = wrap("points",size=0.01)), labeller = label_parsed,
+																		title = "Figure 1: Correlation Scatter Plot Matrix") + theme_classic(base_size = 8)  + 
+	theme(plot.title = element_text(hjust = 0.5, size = 16),
+							plot.margin = margin(4,0,4,0, "cm"))
+# ggsave("plots_pg1.pdf", corr_m, width = 8.5, height = 11)
+
+# C. Check for outliers within each variable defined as outside of three standard deviations 
+#  1. Define function
+outlier_func <- function(x) {
+	return(x[(x > (mean(x) + 3 * sd(x))) | (x < (mean(x) - 3 * sd(x)))])
+}
+
+outlier_func2 <- function(x) {
+	return((x > (mean(x) + 3 * sd(x))) | (x < (mean(x) - 3 * sd(x))))
+}
+
+#  2. Count 
+outliers_cnt <- data.frame(cnt_outliers = sapply(concrete, function(x) length(outlier_func(x))))
+
+#  3. Review rows # check for overlap 
+nms <- names(concrete)
+outlier_tbl <- concrete %>% 
+	mutate(across(all_of(nms),  list(flg = outlier_func2), .names = "{.col}.{.fn}")) %>% 
+	filter(if_any(ends_with("flg"), ~. >=1)) %>% 
+	melt(nms) %>% 
+	filter(value == TRUE) %>% 
+	dplyr::select(-value) %>% 
+	mutate(outlier_cat = paste0("outlier in ", str_extract(variable, ".*(?=\\.flg)")))
+```
+
+#### Step 3: Distibutions of Variables
+```{r}
+# B. Histograms for all variables
+#  1. Prep data 
+plot_dt <- gather(concrete)
+plot_dt$key2 <- factor(plot_dt$key, labels = c("Age~of~Testing~(days)","Blast~Furnace~Slag~(kg/m^3)","Cement~(kg/m^3)",
+																																															"Coarse~Aggregate~(kg/m^3)","Concrete~Strength~(MPa)","Fine~Aggregate~(kg/m^3)",
+																																															"Fly~Ash~(kg/m^3)","Superplasticizer~(kg/m^3)","Water~(kg/m^3)"))
+#  2. Plot data 
+hist_plot <- ggplot(plot_dt, aes(value)) +
+	geom_histogram(bins = 15, fill="steelblue", color="black") +
+	labs(title = "Figure 2: Histograms of Untransformed Data") +
+	facet_wrap(~key2, scales = 'free', labeller = label_parsed) +
+	ylab("Count") + 
+	xlab("Value") +
+	theme_classic() + 
+	theme(plot.title = element_text(hjust = 0.5, size = 16),
+							plot.margin = margin(1,0,1,0, "cm"))
+# text=element_text(family = "Arial"),
+
+# C. Box plots
+box_plot <- ggplot(plot_dt, aes(value)) +
+	geom_boxplot(fill="steelblue", color="black") +
+	coord_flip() +
+	facet_wrap(~key2, scales = 'free', labeller = label_parsed) +
+	theme_classic() +
+	labs(title = "Figure 3: Box Plots of Untransformed Data") +
+	xlab("Value") +
+	theme(
+							plot.title = element_text(hjust = 0.5, size = 16),
+							plot.margin = margin(1,0,1,0, "cm"))
+# text=element_text(family = "Arial"),
+# D. Combine the above two plots to one page 
+# ggsave("plots_pg2.pdf", ggarrange(hist_plot, box_plot, ncol=1, align = "hv") +
+	# theme(plot.margin = margin(0,2,0,2, "cm")), width = 8.5, height = 11)
+
+```
+
+
+#### Step 4: Transformations
+##### Part a: Full Model
+```{r}
+# A. Train/Test 75/25 split 
+#  1. Split the data
+set.seed(1215385763)
+idx <- sample(1:nrow(concrete), nrow(concrete)*.75, replace = FALSE)
+concrete_train <- concrete[idx, ]
+concrete_test <- concrete[-idx, ]
+
+# B. Compare the two data sets
+#   i. Prep data
+comp_tbl <- concrete %>% 
+	mutate(train_test_cat = ifelse(1:n() %in% idx, "Training Data", "Testing Data"))
+plot_dt2 <- pivot_longer(comp_tbl, cols = names(comp_tbl)[names(comp_tbl) != "train_test_cat"])
+plot_dt2$name2 <- factor(plot_dt2$name, labels = c("Age~of~Testing~(days)","Blast~Furnace~Slag~(kg/m^3)","Cement~(kg/m^3)",
+																																															"Coarse~Aggregate~(kg/m^3)","Concrete~Strength~(MPa)","Fine~Aggregate~(kg/m^3)",
+																																															"Fly~Ash~(kg/m^3)","Superplasticizer~(kg/m^3)","Water~(kg/m^3)"))
+
+#   ii. Make side by side boxplots
+box_plot2 <- ggplot(plot_dt2, aes(value, train_test_cat)) +
+	geom_boxplot(fill="steelblue", color="black") +
+	coord_flip() +
+	facet_wrap(~name2, scales = 'free', labeller = label_parsed) +
+	theme_classic() +
+	labs(title = "Figure 4: Comparison of Training and Test Data") +
+	xlab("Value") +
+	theme(axis.title.x = element_blank(),
+							plot.title = element_text(hjust = 0.5, size = 16),
+							plot.margin = margin(1,1,1,1, "cm"))
+# ggsave("plots_pg3.pdf", ggarrange(box_plot2, ggally_blank(), nrow = 2), width = 8.5, height = 11)
+
+
+# C. Initial full model
+#  1. Fit model
+full.initial_model <- lm(concrete_strength~., data=concrete_train)
+summary(full.initial_model)
+
+#  2. Save plot 
+diag1 <- gg_diagnose(full.initial_model, theme = theme_classic(), plot.all = FALSE)
+diag1_gg <- ggarrange(diag1[10]$res_fitted +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag1[11]$qqplot +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag1[12]$scalelocation +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag1$resleverage +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						ncol =2, nrow = 2)
+# ggsave("plots_pg4.pdf", annotate_figure(diag1_gg, top = text_grob(bquote("Figure 5: Diagnostic Plots For Full Untransformed Model"))), width = 8.5, height = 11)
+
+# C. Perform Box-Cox procedure to check if response needs to transformed 
+#  1. Perform the procedure
+bc <- boxcox(full.initial_model)
+(lambda <- bc$x[which.max(bc$y)])
+# While lambda close 1 with square root being the closest potential transformation at 0.5
+
+#  2. Box Cox Graph 
+boxcox <- gg_boxcox(full.initial_model, scale.factor = 1, showlambda = F) + 
+	theme_classic() +
+	labs(title = "Figure 6: Box-Cox Graph for Full Initital Model") +
+	theme(plot.title = element_text(hjust = 0.5, size = 12),
+								plot.margin = margin(3,3,3,3, "cm"))
+
+#  3. Side-by-Side histograms of the response variable
+cs_plot <- ggplot(concrete, aes(concrete_strength)) + 
+		geom_density() +
+		geom_histogram(bins = 15, fill = "steelblue", color = "black", alpha = 0.5) +
+		labs(title = TeX("Figure 7: Histogram of Concrete Strength (MPa)")) +
+		ylab("Count") +
+		xlab(TeX("Concrete Strength (MPa)")) +
+		theme_classic() +
+		theme(plot.title = element_text(hjust = 0.5, size = 11),
+								plot.subtitle = element_text(hjust = 0.5, size = 11),
+								text = element_text(size=10),
+								plot.margin = margin(2,1,2,1, "cm"))
+
+cs_plot_sqrt <- ggplot(concrete, aes(sqrt(concrete_strength))) + 
+		geom_density() +
+		geom_histogram(bins = 15, fill = "steelblue", color = "black", alpha = 0.5) +
+		labs(title = TeX("Figure 8: Histogram of \\sqrt{Concrete Strength (MPa)}")) +
+		ylab("Count") +
+		xlab(TeX("\\sqrt{Concrete Strength (MPa)}")) +
+		theme_classic() +
+		theme(plot.title = element_text(hjust = 0.5, size = 11),
+								plot.subtitle = element_text(hjust = 0.5, size = 11),
+								text = element_text(size=10),
+								plot.margin = margin(2,1,2,1, "cm"))
+
+cs_cmb <- ggarrange(boxcox, ggarrange(cs_plot, cs_plot_sqrt, nrow = 1, align = "hv"), nrow = 2)
+# ggsave("plots_pg5.pdf", cs_cmb, width = 8.5, height = 11)
+
+# E. Run additional models and save diagnostic plots
+#  1. Forward no interaction
+#   i. Fit model
+full.model <- lm(concrete_strength~., concrete_train)
+null.model <- lm(sqrt(concrete_strength)~1, concrete_train)
+n <- nrow(concrete_train)
+step.f.sqrt <- stepAIC(null.model, scope=list(upper=full.model, lower=~1), trace=F, direction="forward", k=log(n))
+step.f.sqrt.m <- lm(sqrt(concrete_strength) ~ cement + age + superplasticizer + blast_furnace_slag + 
+    water + fly_ash, concrete_train)
+
+#   ii. Diagnostics plots
+diag2 <- gg_diagnose(step.f.sqrt.m, theme = theme_classic(), plot.all = FALSE)
+diag2_gg <- ggarrange(diag2$res_fitted +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag2$qqplot +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag2$scalelocation +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag2$resleverage +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						ncol =2, nrow = 2)
+
+# ggsave("plots_pg6.pdf", annotate_figure(diag2_gg, top = text_grob(bquote("Figure 9: Diagnostic Plots For Forward Stepwise Model Without Interaction Effects"))), width = 8.5, height = 11)
+
+#  2. Forward with interaction
+#   i. Fit model
+full.model <- lm(sqrt(concrete_strength)~.^2, concrete_train)
+null.model <- lm(sqrt(concrete_strength)~1, concrete_train)
+n <- nrow(concrete_train)
+step.f.sqrt <- stepAIC(null.model, scope=list(upper=full.model, lower=~1), trace=F, direction="forward", k=log(n))
+step.f.sqrt.m <- lm(sqrt(concrete_strength) ~ cement + age + superplasticizer + blast_furnace_slag + 
+    fly_ash + water + age*superplasticizer + age*fly_ash + superplasticizer*water + 
+    cement*age, concrete_train)
+
+#   ii. Diagnostics plots
+diag2 <- gg_diagnose(step.f.sqrt.m, theme = theme_classic(), plot.all = FALSE)
+diag2_gg <- ggarrange(diag2$res_fitted +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag2$qqplot +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag2$scalelocation +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag2$resleverage +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						ncol =2, nrow = 2)
+
+# ggsave("plots_pg7.pdf", annotate_figure(diag2_gg, top = text_grob(bquote("Figure 10: Diagnostic Plots For Forward Stepwise Model With First-Order Interactions"))), width = 8.5, height = 11)
+
+#  3. Forward with second degree polynomial no interaction
+#   i. Fit model
+full.model <- lm(concrete_strength~cement+I(cement^2)+blast_furnace_slag+I(blast_furnace_slag^2)+fly_ash+I(fly_ash^2)+water+I(water^2) + superplasticizer + I(superplasticizer^2) + coarse_aggregate + I(coarse_aggregate^2) + fine_aggregate + I(fine_aggregate^2) + age + I(age^2), concrete_train)
+null.model <- lm(sqrt(concrete_strength)~1, concrete_train)
+n <- nrow(concrete_train)
+step.f.sqrt.poly <- stepAIC(null.model, scope=list(upper=full.model, lower=~1), trace=F, direction="forward", k=log(n))
+step.f.sqrt.poly.m <- lm(sqrt(concrete_strength) ~ cement + age + I(age^2) + superplasticizer + 
+    blast_furnace_slag + I(superplasticizer^2) + water + fly_ash + 
+    I(fly_ash^2) + I(cement^2) + I(blast_furnace_slag^2), concrete_train)
+
+#   ii. Diagnostics plots
+diag3 <- gg_diagnose(step.f.sqrt.poly.m, theme = theme_classic(), plot.all = FALSE)
+diag3_gg <- ggarrange(diag3$res_fitted +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag3$qqplot +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag3$scalelocation +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag3$resleverage +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						ncol =2, nrow = 2)
+
+# ggsave("plots_pg8.pdf", annotate_figure(diag2_gg, top = text_grob(bquote("Figure 11: Diagnostic Plots For Forward Stepwise Second-Order Polynomial Model With First-Order Interactions"))), width = 8.5, height = 11)
+
+```
+
+##### Part b: Potential Predictor Transformations
+```{r}
+# A. Univariate series of plots for each predictor - 3 charts: box plot + histogram (incl density overlay) + scatter vs strength
+plot_fn <- function(x, lab, title_size=9) {
+	# first draw the boxplot
+	p1 <- ggplot(concrete, aes(x)) +
+		geom_boxplot(color = "black", fill = "steelblue", alpha = 0.5) +
+		coord_flip() +
+		xlab(TeX(lab)) +
+		labs(title = TeX(paste("Box Plot of ", lab))) +
+		theme_classic() +
+		theme(axis.text.x.bottom = element_blank(),
+								axis.ticks.x = element_blank(),
+								text = element_text(size=8),
+								plot.title = element_text(hjust = 0.5, size = title_size),
+								plot.subtitle = element_text(hjust = 0.5, size = title_size),
+								plot.margin = margin(1,1,1,1, "cm"))
+	
+	# then the histogram with the overlay
+	p2 <- ggplot(concrete, aes(x)) + 
+		geom_density() +
+		geom_histogram(aes(y = ..density..), bins = 15, fill = "steelblue", color = "black", alpha = 0.5) +
+		labs(title = TeX(paste("Histogram of ", lab))) +
+		ylab("Density") +
+		xlab(TeX(lab)) +
+		theme_classic() +
+		theme(plot.title = element_text(hjust = 0.5, size = title_size),
+								plot.subtitle = element_text(hjust = 0.5, size = title_size),
+								text = element_text(size=8),
+								plot.margin = margin(1,0,1,0, "cm"))
+	
+	# scatter last
+	p3 <- ggplot(concrete, aes(x=x, y=concrete_strength)) + 
+		geom_point() +
+		labs(title = TeX(paste("Scatter Plot of ", lab)),
+								subtitle = "vs. Concrete Strength") +
+		ylab("Concrete Strength") +
+		xlab(TeX(lab)) +
+		theme_classic() +
+		theme(plot.title = element_text(hjust = 0.5, size = title_size),
+								plot.subtitle = element_text(hjust = 0.5, size = title_size),
+								text = element_text(size=8),
+								plot.margin = margin(1,1,1,1, "cm"))
+	
+	# return plots 
+	ggarrange(p1, p2, p3, nrow = 1, align = "hv")
+}
+
+# B. Untransformed predictors (DELETE)
+# plots <- ggarrange(plot_fn(concrete$water, "Water (kg/m^3)"),
+# 																			plot_fn(sqrt(concrete$coarse_aggregate), "Coarse Aggregate (kg/m^3)"),
+# 																			plot_fn(log(concrete$fine_aggregate + 1), "Fine Aggregate (kg/m^3)"), nrow=3, align = "hv")
+# ggsave("plots_pg3.pdf", annotate_figure(plots, top = "Plot 4: Untransformed Predictors"), width = 8.5, height = 11)
+
+
+
+# C. Tranformed Predictors
+#  1. Cement
+plots_cement <- ggarrange(plot_fn(concrete$cement, "Cement (kg/m^3)"),
+										plot_fn(sqrt(concrete$cement), "\\sqrt{Cement (kg/m^3)}"),
+										plot_fn(log(concrete$cement + 1), "log(Cement (kg/m^3))"),
+										plot_fn(1/(concrete$cement + 1), "(Cement (kg/m^3))^{-1}"), nrow = 4)
+# ggsave("plots_pg9.pdf", annotate_figure(plots_cement, top = text_grob(bquote("Figure 12: Cement "*(kg/m^3)*" Transformations"))), width = 8.5, height = 11)
+
+#  2. Age
+plots_age <- ggarrange(plot_fn(concrete$age, "Age of Testing (days)"),
+										plot_fn(sqrt(concrete$age), "\\sqrt{Age of Testing (days)}"),
+										plot_fn(log(concrete$age + 1), "log(Age of Testing (days))"),
+										plot_fn(1/(concrete$age + 1), "(Age of Testing (days))^{-1}"), nrow = 4)
+# ggsave("plots_pg10.pdf", annotate_figure(plots_age, top = text_grob(bquote("Figure 13: Age of Testing (days) Transformations"))), width = 8.5, height = 11)
+
+
+#  3. Blast~Furnace~Slag~(kg/m^3)
+plots_slag <- ggarrange(plot_fn(concrete$blast_furnace_slag, "Blast Furnace Slag (kg/m^3)", 8),
+										plot_fn(sqrt(concrete$blast_furnace_slag), "\\sqrt{Blast Furnace Slag (kg/m^3)}", 8),
+										plot_fn(log(concrete$blast_furnace_slag + 1), "log(Blast Furnace Slag (kg/m^3) + 1)", 8),
+										plot_fn(1/(concrete$blast_furnace_slag + 1), "(Blast Furnace Slag (kg/m^3) + 1)^{-1}", 8), nrow = 4)
+# ggsave("plots_pg11.pdf", annotate_figure(plots_slag, top = text_grob(bquote("Figure 13: Blast Furnace Slag "*(kg/m^3)*" Transformations"))), width = 8.5, height = 11)
+
+
+
+#  4. Superplasticizer (kg/m^3)
+plots_super <- ggarrange(plot_fn(concrete$superplasticizer, "Superplasticizer (kg/m^3)"),
+										plot_fn(sqrt(concrete$superplasticizer), "\\sqrt{Superplasticizer (kg/m^3)}"),
+										plot_fn(log(concrete$superplasticizer + 1), "log(Superplasticizer (kg/m^3) + 1)"),
+										plot_fn(1/(concrete$superplasticizer + 1), "(Superplasticizer (kg/m^3) + 1)^{-1}"), nrow = 4)
+# ggsave("plots_pg12.pdf", annotate_figure(plots_super, top = text_grob(bquote("Figure 14: Superplasticizer "*(kg/m^3)*" Transformations"))), width = 8.5, height = 11)
+
+
+#  5. Fly Ash
+plots_fly <- ggarrange(plot_fn(concrete$fly_ash, "Fly Ash (kg/m^3)"),
+										plot_fn(sqrt(concrete$fly_ash), "\\sqrt{Fly Ash (kg/m^3)}"),
+										plot_fn(log(concrete$fly_ash + 1), "log(Fly Ash (kg/m^3) + 1)"),
+										plot_fn(1/(concrete$fly_ash + 1), "(Fly Ash (kg/m^3) + 1)^{-1}"), nrow = 4)
+# ggsave("plots_pg13.pdf", annotate_figure(plots_fly, top = text_grob(bquote("Figure 15: Fly Ash "*(kg/m^3)*" Transformations"))), width = 8.5, height = 11)
+
+# D. Fit regression model on all predictors with transformations
+full.transformed_model <- lm(sqrt(concrete_strength) ~ sqrt(cement) + sqrt(blast_furnace_slag) + fly_ash + water + sqrt(superplasticizer) + coarse_aggregate + fine_aggregate + log(age), concrete_train)
+
+# B. Review
+#  1. Summary
+summary(full.transformed_model)
+# stargazer(full.transformed_model, intercept.bottom = FALSE, single.row = TRUE)
+
+#  2. Diagnostic plots
+diag2 <- gg_diagnose(full.transformed_model, theme = theme_classic(), plot.all = FALSE)
+diag2_gg <- ggarrange(diag2[10]$res_fitted +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag2[11]$qqplot +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag2[12]$scalelocation +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag2$resleverage +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						ncol =2, nrow = 2)
+# ggsave("plots_pg14.pdf", annotate_figure(diag2_gg, top = text_grob(bquote("Figure 16: Diagnostic Plots For Full Transformed Model"))), width = 8.5, height = 11)
+
+```
+
+#### Part 5: Model Selection
+```{r}
+# A. Apply predictor transformations 
+#  1. Training data
+concrete_train <- concrete_train %>% 
+	mutate(concrete_strength=sqrt(concrete_strength),
+								age=log(age),
+								blast_furnace_slag=sqrt(blast_furnace_slag),
+								superplasticizer=sqrt(superplasticizer),
+								cement=sqrt(cement))
+
+#  2. Testing data
+concrete_test <- concrete_test %>% 
+	mutate(concrete_strength=sqrt(concrete_strength),
+								age=log(age),
+								blast_furnace_slag=sqrt(blast_furnace_slag),
+								superplasticizer=sqrt(superplasticizer),
+								cement=sqrt(cement))
+
+# B. Perform stepwise model selection
+#  1. Define full (all variables + all two way interactions) and null models 
+null.model <- lm(concrete_strength~1, concrete_train)
+full.model <- lm(concrete_strength~.^2, concrete_train)
+
+#  2. Perform procedure with BIC (change header!!!)
+n <- nrow(concrete_train)
+step.f <- stepAIC(null.model, scope=list(upper=full.model, lower=~1), trace=F, direction="both", k=log(n))
+step.f_smry <- step.f$anova
+
+#  3. Review steps 
+step.f_smry2 <- step.f_smry %>% 
+	mutate(prc_chg = (AIC - lag(AIC))/abs(lag(AIC)) * 100)
+# stargazer(step.f_smry2, summary = FALSE)
+
+#  4. Plot percent change # add annotations for models 1 through 4
+# prc_chng <- tibble(p=1:22, amount=step.f_smry2$prc_chg)
+# prc_chng_plot <- ggplot(prc_chng, aes(x=p, y=amount/100)) + 
+# 	geom_line() +
+# 	scale_y_continuous(labels = scales::percent) +
+# 	xlab("Number of Predictors (p)") + 
+# 	ylab("BIC Percent Change (%)") +
+# 	labs(title = "Figure 14: BIC Percent Change Over Number of Parameters") +
+# 	theme_classic() +
+# 	theme(plot.title = element_text(hjust = 0.5, size = 12),
+# 							plot.margin = margin(1,1,1,1, "cm"))
+# ggsave("plots_pg9.pdf", ggarrange(prc_chng_plot, ggally_blank(), nrow = 2), width = 8.5, height = 11)
+```
+
+
+#### Step 6: Validation
+```{r}
+# A. Prepare validation set
+newdata <- concrete_test[,-9]
+
+# B. Fit potential models on training data
+#  1. Model with 9 predictors
+#   i. Fit model
+model.10 <- lm(concrete_strength~age + cement + superplasticizer + blast_furnace_slag + water + fly_ash + cement*age + water*superplasticizer + blast_furnace_slag*water, concrete_train)
+
+#   ii. Diagnostic Plots
+diag_m10 <- gg_diagnose(model.10, theme = theme_classic(), plot.all = FALSE)
+diag_m10_gg <- ggarrange(diag_m10$res_fitted +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag_m10$qqplot +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag_m10$scalelocation +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag_m10$resleverage +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						ncol =2, nrow = 2)
+# ggsave("plots_pg15.pdf", annotate_figure(diag_m10_gg, top = text_grob(bquote("Figure 17: Diagnostic Plots For Model 1 (9 Variables)"))), width = 8.5, height = 11)
+
+
+#  2. Model with 13 predictors
+#   i. Fit model
+model.14 <- lm(concrete_strength~age + cement + superplasticizer + blast_furnace_slag + water + fly_ash + cement*age + water*superplasticizer + blast_furnace_slag*water + fly_ash*superplasticizer + cement*blast_furnace_slag + coarse_aggregate + superplasticizer*coarse_aggregate, concrete_train)
+
+#   ii. Diagnostic Plots
+diag_m14 <- gg_diagnose(model.14, theme = theme_classic(), plot.all = FALSE)
+diag_m14_gg <- ggarrange(diag_m14$res_fitted +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag_m14$qqplot +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag_m14$scalelocation +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag_m14$resleverage +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						ncol =2, nrow = 2)
+# ggsave("plots_pg11.pdf", annotate_figure(diag_m14_gg, top = text_grob(bquote("Figure 15: Diagnostic Plots For Model 2 (13 Variables)"))), width = 8.5, height = 11)
+
+
+#  3. Model with 16 predictors
+#   i. Fit model
+model.17 <- lm(concrete_strength~age + cement + superplasticizer + blast_furnace_slag + water + fly_ash + cement*age + water*superplasticizer + blast_furnace_slag*water + fly_ash*superplasticizer + cement*blast_furnace_slag + coarse_aggregate + superplasticizer*coarse_aggregate + blast_furnace_slag*coarse_aggregate + fine_aggregate + fly_ash*fine_aggregate, concrete_train)
+
+#   ii. Diagnostic Plots
+diag_m17 <- gg_diagnose(model.17, theme = theme_classic(), plot.all = FALSE)
+diag_m17_gg <- ggarrange(diag_m17$res_fitted +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag_m17$qqplot +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag_m17$scalelocation +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag_m17$resleverage +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						ncol =2, nrow = 2)
+# ggsave("plots_pg12.pdf", annotate_figure(diag_m17_gg, top = text_grob(bquote("Figure 16: Diagnostic Plots For Model 3 (16 Variables)"))), width = 8.5, height = 11)
+
+#  4. Model with 21 predictors
+#   i. Fit model
+model.22 <- lm(concrete_strength~age + cement + superplasticizer + blast_furnace_slag + water + fly_ash + cement*age + water*superplasticizer + blast_furnace_slag*water + fly_ash*superplasticizer + cement*blast_furnace_slag + coarse_aggregate + superplasticizer*coarse_aggregate + blast_furnace_slag*coarse_aggregate + fine_aggregate + fly_ash*fine_aggregate + coarse_aggregate*fine_aggregate + water*age + blast_furnace_slag*water + cement*water + blast_furnace_slag*age, concrete_train)
+
+#   ii. Diagnostic Plots
+diag_m22 <- gg_diagnose(model.22, theme = theme_classic(), plot.all = FALSE)
+diag_m22_gg <- ggarrange(diag_m22$res_fitted +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag_m22$qqplot +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag_m22$scalelocation +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag_m22$resleverage +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						ncol =2, nrow = 2)
+# ggsave("plots_pg13.pdf", annotate_figure(diag_m22_gg, top = text_grob(bquote("Figure 17: Diagnostic Plots For Model 4 (21 Variables)"))), width = 8.5, height = 11)
+
+# C. Calculate Y_hat using potential models on the testing data set
+y.hat.10 <- predict(model.10, newdata)
+y.hat.14 <- predict(model.14, newdata)
+y.hat.17 <- predict(model.17, newdata)
+y.hat.22 <- predict(model.22, newdata)
+
+
+# D. Calculate MSPE for each of the potential models
+mspe.10 <- mean((concrete_test$concrete_strength-y.hat.10)^2)
+mspe.14 <- mean((concrete_test$concrete_strength-y.hat.14)^2)
+mspe.17 <- mean((concrete_test$concrete_strength-y.hat.17)^2)
+mspe.22 <- mean((concrete_test$concrete_strength-y.hat.22)^2)
+
+
+
+# E. Calculate SSE from train  
+sse_t.10 <- sum(model.10$residuals^2)
+sse_t.14 <- sum(model.14$residuals^2)
+sse_t.17 <- sum(model.17$residuals^2)
+sse_t.22 <- sum(model.22$residuals^2)
+
+# F. Calculate MSPE to SSE(from model)/N ratios
+mspe.10 - (sse_t.10 / n)
+mspe.14 - (sse_t.14 / n)
+mspe.17 - (sse_t.17 / n)
+mspe.22 - (sse_t.22 / n)
+
+# G. Internal Validation (PRESSp and Cp)
+PRESS_10 <- sum( (model.10$residuals/(1-influence(model.10)$hat))^2)
+PRESS_14 <- sum( (model.14$residuals/(1-influence(model.14)$hat))^2)
+PRESS_17 <- sum( (model.17$residuals/(1-influence(model.17)$hat))^2)
+PRESS_22 <- sum( (model.22$residuals/(1-influence(model.22)$hat))^2)
+
+
+Cp_10 = ols_mallows_cp(model.10, full.model)
+Cp_14 = ols_mallows_cp(model.14, full.model)
+Cp_17 = ols_mallows_cp(model.17, full.model)
+Cp_22 = ols_mallows_cp(model.22, full.model)
+
+# create a summary table 
+out_tbl <- data.frame(p = c(10, 14, 17, 22),
+											cp = c(Cp_10, Cp_14, Cp_17, Cp_22),
+											press <- c(PRESS_10, PRESS_14, PRESS_17, PRESS_22),
+											mspe = c(mspe.10, mspe.14, mspe.17, mspe.22),
+											mspe_sse =  c(mspe.10 - (sse_t.10 / n), mspe.14 - (sse_t.14 / n),
+																									mspe.17 - (sse_t.17 / n),mspe.22 - (sse_t.22 / n)))
+# stargazer(out_tbl, summary = FALSE)
+
+```
+
+
+#### Step 7: Final Model
+```{r}
+# A. Fit the best model on all of the data
+#  1. Apply transformations
+concrete_full_transformed <- data.frame(concrete)
+concrete_full_transformed$concrete_strength <- sqrt(concrete$concrete_strength)
+concrete_full_transformed$age <- log(concrete$age)
+concrete_full_transformed$blast_furnace_slag <- sqrt(concrete$blast_furnace_slag)
+concrete_full_transformed$superplasticizer <- sqrt(concrete$superplasticizer)
+concrete_full_transformed$cement <- sqrt(concrete$cement)
+
+#  2. Fit model
+model.10.full <- lm(concrete_strength~age + cement + superplasticizer + blast_furnace_slag + water + fly_ash + cement*age + water*superplasticizer + blast_furnace_slag*water, concrete_full_transformed)
+
+#  3. Review model diagnostics 
+#   i. Diagnostic Plots
+diag_m10_full <- gg_diagnose(model.10.full, theme = theme_classic(), plot.all = FALSE)
+diag_m10_full_gg <- ggarrange(diag_m10_full$res_fitted +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag_m10_full$qqplot +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag_m10_full$scalelocation +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						diag_m10_full$resleverage +
+																							theme(plot.title = element_text(hjust = 0.5, size = 12),
+																													plot.margin = margin(2,1,2,1, "cm")),
+																						ncol =2, nrow = 2)
+# ggsave("plots_pg16.pdf", annotate_figure(diag_m10_full_gg, top = text_grob(bquote("Figure 18: Diagnostic Plots For Model 1 Fit on All Data"))), width = 8.5, height = 11)
+
+#  4. Model summary
+summary(model.10.full)
+# stargazer(model.10.full, intercept.bottom = FALSE, single.row = TRUE)
+
+#  5. Find outliers and HIFs
+#   i. Hat values
+hats <- data.frame(val=hatvalues(model.10.full))
+
+#   ii. Greater than 2p/n (slide 18 week 9)
+length(hats[hats["val"] > 2*9/1030, ])
+# 103 (10% of the data is outlying in X)
+
+hats[hats["val"] > (2*9)/1030, ]
+
+#   iii. Cook's Distance
+c_dist <- cooks.distance(model.10.full)
+
+#   iv. Filter to gt 4/(n-p)
+length(c_dist[c_dist > (4/(1030-9))])
+# 74 (7.2% of the data is highly influential)
+
+c_dist[c_dist > (4/(1030-9))]
+
+c_dist[c_dist > 1]
+
+
+```
